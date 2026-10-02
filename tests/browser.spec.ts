@@ -1,0 +1,55 @@
+import {test,expect} from '@playwright/test';
+import {readFile} from 'node:fs/promises';
+import {PDFDocument} from 'pdf-lib';
+test('letter preview and download contain one A4 page',async({page},testInfo)=>{
+  const failures:string[]=[];page.on('pageerror',e=>failures.push(e.message));
+  await page.goto('/');
+  const downloadButton=page.getByRole('button',{name:'Download PDF',exact:true});
+  await expect(downloadButton).toBeEnabled({timeout:30000});
+  await expect(page.getByRole('img',{name:'First page of the generated A4 PDF'})).toBeVisible();
+  const event=page.waitForEvent('download');await downloadButton.click();const file=await event;
+  const bytes=await readFile((await file.path())!);const pdf=await PDFDocument.load(bytes);
+  expect(pdf.getPageCount()).toBe(1);expect(pdf.getPage(0).getWidth()).toBeCloseTo(595.28,1);
+  expect(pdf.getPage(0).getHeight()).toBeCloseTo(841.89,1);
+  await file.saveAs(testInfo.outputPath('letter-browser.pdf'));
+  await page.screenshot({path:testInfo.outputPath('desktop.png'),fullPage:false});
+  expect(failures).toEqual([]);
+});
+test('manual amounts round-trip through a saved project and stale PDFs cannot download',async({page},testInfo)=>{
+  const writes:string[]=[];page.on('request',r=>{if(r.method()==='POST'||r.method()==='PUT')writes.push(r.url());});
+  await page.goto('/');await page.getByRole('button',{name:'Note to Assessment Plain A4 paper'}).click();
+  await expect(page.getByRole('button',{name:'Download PDF',exact:true})).toBeEnabled({timeout:30000});
+  await page.getByRole('textbox',{name:'Tax payable 2025',exact:true}).fill('987,654.32');
+  await page.getByRole('textbox',{name:'Tax due 2025',exact:true}).fill('1.00');
+  await expect(page.getByRole('textbox',{name:'Tax payable 2025',exact:true})).toHaveValue('987,654.32');
+  await expect(page.getByRole('button',{name:'Download PDF',exact:true})).toBeDisabled();
+  const event=page.waitForEvent('download');await page.getByRole('button',{name:'Save project',exact:true}).click();
+  const file=await event;const raw=await readFile((await file.path())!,'utf8');expect(JSON.parse(raw).data.taxPayable[2]).toBe('987,654.32');
+  await page.getByRole('textbox',{name:'Tax payable 2025',exact:true}).fill('222');
+  page.on('dialog',dialog=>dialog.accept());
+  await page.locator('input[type=file]').setInputFiles({name:'saved.json',mimeType:'application/json',buffer:Buffer.from(raw)});
+  await expect(page.getByRole('textbox',{name:'Tax payable 2025',exact:true})).toHaveValue('987,654.32');
+  await expect(page.getByRole('button',{name:'Download PDF',exact:true})).toBeEnabled({timeout:30000});
+  const pdfEvent=page.waitForEvent('download');await page.getByRole('button',{name:'Download PDF',exact:true}).click();await (await pdfEvent).saveAs(testInfo.outputPath('note-browser.pdf'));
+  expect(writes).toEqual([]);
+});
+test('overlong content blocks export; malformed imports leave fields unchanged',async({page})=>{
+  await page.goto('/');await page.getByRole('button',{name:'Note to Assessment Plain A4 paper'}).click();
+  await expect(page.getByRole('button',{name:'Download PDF',exact:true})).toBeEnabled({timeout:30000});
+  const name=await page.getByRole('textbox',{name:'Taxpayer name',exact:true}).inputValue();
+  await page.locator('input[type=file]').setInputFiles({name:'bad.json',mimeType:'application/json',buffer:Buffer.from('{"version":99}')});
+  await expect(page.getByRole('alert')).toContainText('does not match');
+  await expect(page.getByRole('textbox',{name:'Taxpayer name',exact:true})).toHaveValue(name);
+  await page.getByRole('textbox',{name:'Brief',exact:true}).fill('Long sample text to check overflow. '.repeat(150));
+  await page.getByRole('button',{name:'Update preview',exact:true}).click();
+  await expect(page.getByRole('alert')).toContainText('PDF download is blocked',{timeout:30000});
+  await expect(page.getByRole('button',{name:'Download PDF',exact:true})).toBeDisabled();
+});
+test('phone form and PDF preview remain usable without horizontal scrolling',async({page},testInfo)=>{
+  await page.setViewportSize({width:390,height:844});await page.goto('/');
+  await expect(page.getByRole('textbox',{name:'Document reference',exact:true})).toBeVisible();
+  await page.getByRole('button',{name:'View PDF',exact:true}).click();
+  await expect(page.getByRole('button',{name:'Download PDF',exact:true})).toBeEnabled({timeout:30000});
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth)).toBe(true);
+  await page.screenshot({path:testInfo.outputPath('mobile.png'),fullPage:true});
+});
